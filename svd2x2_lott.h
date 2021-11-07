@@ -59,7 +59,7 @@ class SVD2x2_Jacobi
     //Solve all this to canonical form via permutations and sign flips of the columns of U/V
     double clean_permutations_and_signs(const Eigen::Matrix<double,2,2> & Dt);
 
-    //In the case of patholotical matrices where the two singular valus are very close
+    //In the case of patholotical matrices where the two singular values are very close
     // the jacobi rotations (as implemented) are not stable.  Backup to ATAN method (slower)
     void atanUV(const Eigen::Matrix<double,2,2> & A);
 };

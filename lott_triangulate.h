@@ -183,7 +183,7 @@ lott_distance_quadratic(
 	const Eigen::Matrix<double,4,1> & A)
 {
 	//Singular value, a - This factor is point independent, 
-	// may be extracted for speed - compiler will probably do this for you
+	// may be extracted for speed - compiler will probably do that for you given "const" keyword
 	const double r1 = sqrt((F(0,0)+F(1,1))*(F(0,0)+F(1,1)) + (F(0,1) - F(1,0))*(F(0,1) - F(1,0)));
 	const double r2 = sqrt((F(0,0)-F(1,1))*(F(0,0)-F(1,1)) + (F(0,1) + F(1,0))*(F(0,1) + F(1,0)));
 	const double a = 0.5*(r1 + r2);
@@ -275,7 +275,7 @@ void lott_triangulate(
 		}
 
 		//Step 7: normalize by abs(c) has been replaced with a change of variables
-		//        in the solution polynomial. p6(-c*x)/c^4.
+		//        in the solution polynomial. p6(-c*x)/c^4.  Handled internally in root finding.
 
 		//**Guaranteed convergence to the root
 		//Step 8: Build the polynomial and its derivative
