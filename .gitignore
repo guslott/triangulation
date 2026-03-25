@@ -1,0 +1,8 @@
+build/
+results/
+manifests/
+__pycache__/
+*.o
+*.d
+*.pyc
+.DS_Store
