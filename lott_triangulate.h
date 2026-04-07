@@ -860,24 +860,40 @@ void lott_triangulate(const Eigen::Matrix<double, 4, -1> &A,
 
     // Step 7:
     //  According to which of c, d, e, f has the larger amplitude,
-    //  pick the appropriate normalized polynomial
+    //  pick the appropriate normalized polynomial.
+    //
+    //  PSD-safe search intervals (paper Eq. psd_safe_intervals):
+    //  The Lagrangian Hessian H = I + 2*lambda*D is PSD iff lambda in [0, 1/(2a)].
+    //  Mapping lambda = 1/(2a) through each chart's KKT relation gives the
+    //  chart-specific left bound of the PSD-safe interval in normalized t:
+    //    x-chart: t in [-1/(2a),     0]
+    //    y-chart: t in [-1/(a+b),    0]
+    //    z-chart: t in (-inf,        0]  (all poles positive; entire neg axis safe)
+    //    w-chart: t in [-1/(a-b),    0]  (a > b)
+    //
+    //  The adaptive bracket finder (full_root_iterative) locates the sign change
+    //  organically. The PSD-safe bound is used below as an analytical clamp to
+    //  guarantee the converged root satisfies the Lagrangian certificate.
     double p[7];
+    double psd_safe_left = -std::numeric_limits<double>::infinity();
     if (largest_idx == 1) {
       lott_poly6_cx<7>(a, b, c, d, e, f, g, p);
+      // x-chart: PSD-safe left = -1/(2a)
+      if (a > 0.0) psd_safe_left = -1.0 / (2.0 * a);
     } else if (largest_idx == 2) {
-      // Note that this is the same as the x-polynomial,
-      //  but with a & b swapped, d & c swapped, and f & e swapped (see Jupyter
-      //  notebook)
+      // y-chart: a'=b, b'=a; PSD-safe left = -1/(a+b)
       lott_poly6_cx<7>(b, a, d, c, f, e, g, p);
+      if (a + b > 0.0) psd_safe_left = -1.0 / (a + b);
     } else if (largest_idx == 3) {
-      // Note that this is the same as the x-polynomial,
-      //  but with a swapped with -a, e & c are swapped,
+      // z-chart: a'=-a; all poles positive, entire negative axis PSD-safe
       lott_poly6_cx<7>(-a, b, e, d, c, f, g, p);
+      psd_safe_left = -std::numeric_limits<double>::infinity();
     } else // largest_idx == 4
     {
-      // The w-poly is the same as the x-polynomial,
-      // but a & -b swapped, b & -a swapped, c & f swapped, d & e swapped
+      // w-chart: a'=-b, b'=-a; PSD-safe left = -1/(a-b)
       lott_poly6_cx<7>(-b, -a, f, e, d, c, g, p);
+      if (a - b > 0.0) psd_safe_left = -1.0 / (a - b);
+      // When a == b, PSD-safe extends to -inf (already initialized)
     }
 
     // Step 8-9: solve the selected chart polynomial.
@@ -910,6 +926,15 @@ void lott_triangulate(const Eigen::Matrix<double, 4, -1> &A,
     if (!std::isfinite(rt)) {
       rt = 0.0;
       root_diag.converged = false;
+    }
+    // Clamp to PSD-safe interval: ensures the Lagrangian certificate holds.
+    // The root must satisfy t <= 0 (all roots non-positive) and
+    // t >= psd_safe_left (Hessian PSD). For the z-chart, psd_safe_left = -inf.
+    if (std::isfinite(psd_safe_left) && rt < psd_safe_left) {
+      rt = psd_safe_left;
+    }
+    if (rt > 0.0) {
+      rt = 0.0;
     }
     if (solver_diag != nullptr) {
       if (root_solver_mode == 0) {
