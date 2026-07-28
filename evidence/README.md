@@ -9,9 +9,9 @@ seeds, and SHA-256 hashes of the locally retained raw outputs.
 - `2026-07-28T143835Z_manifest.md`: **superseded for timing claims** because
   methods were timed in sequential blocks.  The run remains evidence for its
   passing theorem, baseline-acceptance, and correctness checks.
-- The newest manifest produced after the interleaved timing protocol was
-  committed is the authoritative timing run.  It must report a clean Git state
-  and a zero pipeline exit status before its numbers are copied into the paper.
+- `2026-07-28T145115Z_manifest.md`: **authoritative revision run**.  It was
+  produced from clean commit `e53b19c`, reports a zero pipeline exit status,
+  and uses the deterministic interleaved timing protocol.
 
 Raw and processed benchmark outputs stay under the ignored `results/` tree so
 large point-level CSV files do not enter source control.  Their hashes in each
