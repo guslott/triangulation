@@ -32,6 +32,7 @@
 #pragma once
 #include <Eigen/Dense>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -47,19 +48,48 @@ constexpr double C_NEAR_ZERO_RATIO_TOL = 1e-3;
 struct LottRootDiagnostics {
   bool used_sign_bracket = false;
   bool converged = false;
+  // In certified mode these endpoints are Lagrange multipliers, not chart
+  // coordinates.  Approximation modes do not claim a bracket.
+  bool bracket_is_multiplier = false;
   int iterations = 0;
   int bisection_steps = 0;
   int guarded_halfsteps = 0;
   int nonfinite_eval_steps = 0;
   double bracket_left = std::numeric_limits<double>::quiet_NaN();
   double bracket_right = std::numeric_limits<double>::quiet_NaN();
+  double multiplier = std::numeric_limits<double>::quiet_NaN();
+  double minimum_hessian_eigenvalue =
+      std::numeric_limits<double>::quiet_NaN();
 };
+
+// Per-correspondence outcome.  Positive values identify the path that returned
+// a certified optimum; LOTT_STATUS_UNCERTIFIED_APPROXIMATE is reserved for the
+// timing-oriented one-step Householder modes; negative values fail closed.
+enum LottPointStatus : int {
+  LOTT_STATUS_UNSET = 0,
+  LOTT_STATUS_ALREADY_FEASIBLE = 1,
+  LOTT_STATUS_AFFINE = 2,
+  LOTT_STATUS_REGULAR_INTERIOR = 3,
+  LOTT_STATUS_BOUNDARY_PSD_UNIQUE = 4,
+  LOTT_STATUS_BOUNDARY_PSD_NONUNIQUE = 5,
+  LOTT_STATUS_UNCERTIFIED_APPROXIMATE = 6,
+  LOTT_STATUS_FAILED_INVALID_INPUT = -1,
+  LOTT_STATUS_FAILED_BRACKET = -2,
+  LOTT_STATUS_FAILED_CERTIFICATE = -3
+};
+
+inline bool lott_status_is_certified(const LottPointStatus status) {
+  return status >= LOTT_STATUS_ALREADY_FEASIBLE &&
+         status <= LOTT_STATUS_BOUNDARY_PSD_NONUNIQUE;
+}
 
 struct LottSolverDiagnostics {
   long long points_total = 0;
   long long roots_bracketed = 0;
   long long roots_unbracketed = 0;
   long long roots_converged = 0;
+  // Historical name: in exact mode this counts any failed solver path,
+  // including invalid input, bracketing failure, or certificate rejection.
   long long roots_max_steps = 0;
   long long total_iterations = 0;
   long long bisection_steps = 0;
@@ -68,6 +98,9 @@ struct LottSolverDiagnostics {
   long long chart_non_x_points = 0;
   long long c_near_zero_points = 0;
   long long c_near_zero_non_x_points = 0;
+  // In exact mode, eq1/gt1 count unique/nonunique theorem certificates, not
+  // Sturm roots.  eq0 and the older Sturm/IVT/long-double fields below remain
+  // for source compatibility and are not populated by the theorem solver.
   long long cert_points = 0;
   long long cert_rootcount_eq0 = 0;
   long long cert_rootcount_eq1 = 0;
@@ -83,6 +116,19 @@ struct LottSolverDiagnostics {
   long long cert_longdouble_attempts = 0;
   long long cert_longdouble_rescues = 0;
   long long cert_longdouble_failures = 0;
+  long long already_feasible_points = 0;
+  long long affine_points = 0;
+  long long regular_interior_points = 0;
+  long long boundary_psd_unique_points = 0;
+  long long boundary_psd_nonunique_points = 0;
+  long long uncertified_approximate_points = 0;
+  long long failed_invalid_input_points = 0;
+  long long failed_bracket_points = 0;
+  long long failed_certificate_points = 0;
+  long long cert_feasibility_failures = 0;
+  long long cert_kkt_failures = 0;
+  long long cert_psd_failures = 0;
+  long long chart_points[4] = {0, 0, 0, 0};
 };
 
 template <int PORDER> double polyval(const double *p, const double x) {
@@ -696,6 +742,693 @@ inline int sturm_root_count_open_interval_poly6(const double p[7],
   return count;
 }
 
+struct LottCertifiedPointResult {
+  Eigen::Vector4d correction = Eigen::Vector4d::Constant(
+      std::numeric_limits<double>::quiet_NaN());
+  LottPointStatus status = LOTT_STATUS_UNSET;
+  // Convention retained by lott_triangulate_certified_fallback: one means a
+  // unique certified optimum, two means a nonunique PSD-boundary optimum, and
+  // minus one means fail closed and request the external all-candidate fallback.
+  int certified_solution_count = -1;
+  LottRootDiagnostics root;
+  bool feasibility_ok = false;
+  bool kkt_ok = false;
+  bool hessian_ok = false;
+};
+
+namespace lott_certified_detail {
+
+using LD4 = std::array<long double, 4>;
+
+inline bool finite4(const LD4 &u) {
+  return std::isfinite(u[0]) && std::isfinite(u[1]) &&
+         std::isfinite(u[2]) && std::isfinite(u[3]);
+}
+
+inline long double constraint_value(const long double a, const long double b,
+                                    const LD4 &q, const long double g,
+                                    const LD4 &u) {
+  return a * u[0] * u[0] + b * u[1] * u[1] - a * u[2] * u[2] -
+         b * u[3] * u[3] + 2.0L * (q[0] * u[0] + q[1] * u[1] +
+                                      q[2] * u[2] + q[3] * u[3]) +
+         g;
+}
+
+inline long double constraint_scale(const long double a, const long double b,
+                                    const LD4 &q, const long double g,
+                                    const LD4 &u) {
+  return std::max(
+      1.0L, std::abs(g) + std::abs(a * u[0] * u[0]) +
+                std::abs(b * u[1] * u[1]) +
+                std::abs(a * u[2] * u[2]) +
+                std::abs(b * u[3] * u[3]) +
+                2.0L * (std::abs(q[0] * u[0]) + std::abs(q[1] * u[1]) +
+                         std::abs(q[2] * u[2]) +
+                         std::abs(q[3] * u[3])));
+}
+
+inline void set_double_correction(const LD4 &u,
+                                  LottCertifiedPointResult &result) {
+  for (int j = 0; j < 4; ++j) {
+    result.correction(j) = static_cast<double>(u[static_cast<size_t>(j)]);
+  }
+}
+
+inline LD4 rounded_correction(const LottCertifiedPointResult &result) {
+  return {static_cast<long double>(result.correction(0)),
+          static_cast<long double>(result.correction(1)),
+          static_cast<long double>(result.correction(2)),
+          static_cast<long double>(result.correction(3))};
+}
+
+// Verify the three numerical facts used by the global-optimality proof:
+// feasibility, stationarity, and a positive-(semi)definite Lagrangian Hessian.
+// All coefficients below have first been divided by one common positive scale,
+// which leaves both the feasible set and correction unchanged.
+inline bool certify(const long double a, const long double b, const LD4 &q,
+                    const long double g, const LD4 &u,
+                    const long double mu, const bool boundary_psd,
+                    LottCertifiedPointResult &result) {
+  constexpr long double kTol =
+      8192.0L * static_cast<long double>(std::numeric_limits<double>::epsilon());
+  if (!finite4(u)) {
+    return false;
+  }
+
+  const long double h = constraint_value(a, b, q, g, u);
+  const long double h_scale = constraint_scale(a, b, q, g, u);
+  result.feasibility_ok =
+      std::isfinite(h) && std::abs(h) <= kTol * h_scale;
+
+  if (!(a > 0.0L)) {
+    // Affine path: the mu argument carries lambda for the normalized
+    // constraint (there is no finite lambda_b with which to normalize it).
+    const long double two_lambda = 2.0L * mu;
+    long double residual = 0.0L;
+    long double residual_scale = 1.0L;
+    for (int j = 0; j < 4; ++j) {
+      const long double rhs = two_lambda * q[static_cast<size_t>(j)];
+      residual = std::max(
+          residual, std::abs(u[static_cast<size_t>(j)] + rhs));
+      residual_scale = std::max(
+          residual_scale,
+          std::abs(u[static_cast<size_t>(j)]) + std::abs(rhs));
+    }
+    result.kkt_ok = residual <= kTol * residual_scale;
+    result.hessian_ok = true;
+    result.root.minimum_hessian_eigenvalue = 1.0;
+    return result.feasibility_ok && result.kkt_ok;
+  }
+
+  const long double ratio = b / a;
+  const LD4 hdiag = {1.0L + mu, 1.0L + ratio * mu, 1.0L - mu,
+                     1.0L - ratio * mu};
+  const long double two_lambda = mu / a;
+  long double residual = 0.0L;
+  long double residual_scale = 1.0L;
+  long double min_h = hdiag[0];
+  for (int j = 0; j < 4; ++j) {
+    const long double rhs = two_lambda * q[static_cast<size_t>(j)];
+    const long double lhs =
+        hdiag[static_cast<size_t>(j)] * u[static_cast<size_t>(j)];
+    residual = std::max(residual, std::abs(lhs + rhs));
+    residual_scale =
+        std::max(residual_scale, std::abs(lhs) + std::abs(rhs));
+    min_h = std::min(min_h, hdiag[static_cast<size_t>(j)]);
+  }
+  result.kkt_ok = residual <= kTol * residual_scale;
+  result.hessian_ok = boundary_psd ? (min_h >= -kTol) : (min_h > 0.0L);
+  result.root.minimum_hessian_eigenvalue = static_cast<double>(min_h);
+  return result.feasibility_ok && result.kkt_ok && result.hessian_ok;
+}
+
+struct PhiEvaluation {
+  long double value = std::numeric_limits<long double>::quiet_NaN();
+  long double derivative = std::numeric_limits<long double>::quiet_NaN();
+  long double scale = 1.0L;
+};
+
+inline PhiEvaluation evaluate_phi(const long double a, const long double b,
+                                  const LD4 &q, const long double g,
+                                  const long double mu) {
+  PhiEvaluation out;
+  if (!(a > 0.0L) || !(mu >= 0.0L) || !(mu < 1.0L)) {
+    return out;
+  }
+  const long double ratio = b / a;
+  const LD4 signs = {1.0L, ratio, -1.0L, -ratio};
+  long double reduction = 0.0L;
+  long double reduction_abs = 0.0L;
+  long double derivative_sum = 0.0L;
+  for (int j = 0; j < 4; ++j) {
+    const long double s = signs[static_cast<size_t>(j)];
+    const long double den = 1.0L + s * mu;
+    if (!(den > 0.0L)) {
+      return out;
+    }
+    const long double q2 = q[static_cast<size_t>(j)] *
+                           q[static_cast<size_t>(j)];
+    const long double term =
+        (q2 / a) * mu * (2.0L + s * mu) / (den * den);
+    reduction += term;
+    reduction_abs += std::abs(term);
+    derivative_sum += q2 / (den * den * den);
+  }
+  out.value = g - reduction;
+  out.derivative = -2.0L * derivative_sum / a;
+  out.scale = std::max(1.0L, std::abs(g) + reduction_abs);
+  return out;
+}
+
+inline LD4 reconstruct_regular(const long double a, const long double b,
+                               const LD4 &q, const long double mu) {
+  const long double ratio = b / a;
+  const LD4 hdiag = {1.0L + mu, 1.0L + ratio * mu, 1.0L - mu,
+                     1.0L - ratio * mu};
+  const long double two_lambda = mu / a;
+  LD4 u{};
+  for (int j = 0; j < 4; ++j) {
+    u[static_cast<size_t>(j)] =
+        -two_lambda * q[static_cast<size_t>(j)] /
+        hdiag[static_cast<size_t>(j)];
+  }
+  return u;
+}
+
+// Complementary evaluation for roots near the PSD endpoint.  Representing
+// tau=1-mu directly avoids losing all relative accuracy in the singular
+// denominator when mu rounds close to one.
+inline PhiEvaluation evaluate_phi_tau(const long double a,
+                                      const long double b, const LD4 &q,
+                                      const long double g,
+                                      const long double tau) {
+  PhiEvaluation out;
+  if (!(a > 0.0L) || !(tau > 0.0L) || !(tau <= 1.0L)) {
+    return out;
+  }
+  const long double ratio = b / a;
+  const long double mu = 1.0L - tau;
+  const LD4 hdiag = {2.0L - tau, 1.0L + ratio - ratio * tau, tau,
+                     1.0L - ratio + ratio * tau};
+  const LD4 signs = {1.0L, ratio, -1.0L, -ratio};
+  long double reduction = 0.0L;
+  long double reduction_abs = 0.0L;
+  long double derivative_sum = 0.0L;
+  for (int j = 0; j < 4; ++j) {
+    const long double den = hdiag[static_cast<size_t>(j)];
+    if (!(den > 0.0L)) {
+      return out;
+    }
+    const long double q2 = q[static_cast<size_t>(j)] *
+                           q[static_cast<size_t>(j)];
+    long double numerator =
+        mu * (2.0L + signs[static_cast<size_t>(j)] * mu);
+    if (j == 2) {
+      // mu(2-mu)=1-tau^2, evaluated without subtracting tau from one.
+      numerator = 1.0L - tau * tau;
+    } else if (j == 3 && ratio == 1.0L) {
+      numerator = 1.0L - tau * tau;
+    }
+    const long double term = (q2 / a) * numerator / (den * den);
+    reduction += term;
+    reduction_abs += std::abs(term);
+    derivative_sum += q2 / (den * den * den);
+  }
+  out.value = g - reduction;
+  // d phi / d tau = -d phi / d mu > 0.
+  out.derivative = 2.0L * derivative_sum / a;
+  out.scale = std::max(1.0L, std::abs(g) + reduction_abs);
+  return out;
+}
+
+inline LD4 reconstruct_regular_tau(const long double a, const long double b,
+                                   const LD4 &q, const long double tau) {
+  const long double ratio = b / a;
+  const long double mu = 1.0L - tau;
+  const LD4 hdiag = {2.0L - tau, 1.0L + ratio - ratio * tau, tau,
+                     1.0L - ratio + ratio * tau};
+  const long double two_lambda = mu / a;
+  LD4 u{};
+  for (int j = 0; j < 4; ++j) {
+    u[static_cast<size_t>(j)] =
+        -two_lambda * q[static_cast<size_t>(j)] /
+        hdiag[static_cast<size_t>(j)];
+  }
+  return u;
+}
+
+inline bool certify_tau(const long double a, const long double b, const LD4 &q,
+                        const long double g, const LD4 &u,
+                        const long double tau,
+                        LottCertifiedPointResult &result) {
+  constexpr long double kTol =
+      8192.0L * static_cast<long double>(std::numeric_limits<double>::epsilon());
+  if (!finite4(u) || !(tau > 0.0L) || !(tau < 1.0L)) {
+    return false;
+  }
+  const long double h = constraint_value(a, b, q, g, u);
+  const long double h_scale = constraint_scale(a, b, q, g, u);
+  result.feasibility_ok =
+      std::isfinite(h) && std::abs(h) <= kTol * h_scale;
+
+  const long double ratio = b / a;
+  const long double mu = 1.0L - tau;
+  const LD4 hdiag = {2.0L - tau, 1.0L + ratio - ratio * tau, tau,
+                     1.0L - ratio + ratio * tau};
+  const long double two_lambda = mu / a;
+  long double residual = 0.0L;
+  long double residual_scale = 1.0L;
+  long double min_h = hdiag[0];
+  for (int j = 0; j < 4; ++j) {
+    const long double rhs = two_lambda * q[static_cast<size_t>(j)];
+    const long double lhs =
+        hdiag[static_cast<size_t>(j)] * u[static_cast<size_t>(j)];
+    residual = std::max(residual, std::abs(lhs + rhs));
+    residual_scale =
+        std::max(residual_scale, std::abs(lhs) + std::abs(rhs));
+    min_h = std::min(min_h, hdiag[static_cast<size_t>(j)]);
+  }
+  result.kkt_ok = residual <= kTol * residual_scale;
+  result.hessian_ok = min_h > 0.0L;
+  result.root.minimum_hessian_eigenvalue = static_cast<double>(min_h);
+  return result.feasibility_ok && result.kkt_ok && result.hessian_ok;
+}
+
+inline LottCertifiedPointResult solve_regular_tau(
+    const long double a, const long double b, const LD4 &q,
+    const long double g, const double a_input) {
+  LottCertifiedPointResult result;
+  long double left = 0.5L;
+  PhiEvaluation left_eval = evaluate_phi_tau(a, b, q, g, left);
+  int bracket_steps = 0;
+  constexpr int kMaxBracketSteps = 256;
+  while ((std::isnan(left_eval.value) || left_eval.value >= 0.0L) &&
+         bracket_steps < kMaxBracketSteps) {
+    const long double next = 0.5L * left;
+    if (!(next > 0.0L) || !(next < left)) {
+      break;
+    }
+    left = next;
+    left_eval = evaluate_phi_tau(a, b, q, g, left);
+    ++bracket_steps;
+  }
+  long double right = 1.0L;
+  PhiEvaluation right_eval = evaluate_phi_tau(a, b, q, g, right);
+  if (std::isnan(left_eval.value) || !(left_eval.value < 0.0L) ||
+      std::isnan(right_eval.value) || !(right_eval.value > 0.0L)) {
+    result.status = LOTT_STATUS_FAILED_BRACKET;
+    return result;
+  }
+
+  long double x = 0.5L * (left + right);
+  PhiEvaluation x_eval = evaluate_phi_tau(a, b, q, g, x);
+  constexpr int kMaxSolveSteps = 192;
+  constexpr long double kPhiTol =
+      128.0L * static_cast<long double>(std::numeric_limits<double>::epsilon());
+  int iterations = 0;
+  int bisections = 0;
+  for (; iterations < kMaxSolveSteps; ++iterations) {
+    if (std::isnan(x_eval.value)) {
+      ++result.root.nonfinite_eval_steps;
+      x = 0.5L * (left + right);
+      x_eval = evaluate_phi_tau(a, b, q, g, x);
+      ++bisections;
+      if (std::isnan(x_eval.value)) {
+        break;
+      }
+    }
+    if (std::abs(x_eval.value) <= kPhiTol * x_eval.scale) {
+      break;
+    }
+    if (x_eval.value < 0.0L) {
+      left = x;
+      left_eval = x_eval;
+    } else {
+      right = x;
+      right_eval = x_eval;
+    }
+    const long double midpoint = 0.5L * (left + right);
+    if (!(midpoint > left) || !(midpoint < right)) {
+      if (std::abs(left_eval.value) <= std::abs(right_eval.value)) {
+        x = left;
+        x_eval = left_eval;
+      } else {
+        x = right;
+        x_eval = right_eval;
+      }
+      break;
+    }
+    long double proposal = std::numeric_limits<long double>::quiet_NaN();
+    if (std::isfinite(x_eval.derivative) && x_eval.derivative > 0.0L) {
+      proposal = x - x_eval.value / x_eval.derivative;
+    }
+    if (!(proposal > left) || !(proposal < right) ||
+        !std::isfinite(proposal)) {
+      proposal = midpoint;
+      ++bisections;
+    }
+    x = proposal;
+    x_eval = evaluate_phi_tau(a, b, q, g, x);
+  }
+
+  result.root.used_sign_bracket = true;
+  result.root.bracket_is_multiplier = true;
+  result.root.iterations = iterations + bracket_steps;
+  result.root.bisection_steps = bisections;
+  result.root.bracket_left = static_cast<double>(
+      (1.0L - right) / (2.0L * static_cast<long double>(a_input)));
+  result.root.bracket_right = static_cast<double>(
+      (1.0L - left) / (2.0L * static_cast<long double>(a_input)));
+  result.root.multiplier = static_cast<double>(
+      (1.0L - x) / (2.0L * static_cast<long double>(a_input)));
+
+  if (std::isnan(x_eval.value) || !(x > 0.0L) || !(x < 1.0L)) {
+    result.status = LOTT_STATUS_FAILED_BRACKET;
+    return result;
+  }
+  const LD4 u = reconstruct_regular_tau(a, b, q, x);
+  set_double_correction(u, result);
+  if (result.correction.allFinite() &&
+      certify_tau(a, b, q, g, rounded_correction(result), x, result)) {
+    result.root.converged = true;
+    result.status = LOTT_STATUS_REGULAR_INTERIOR;
+    result.certified_solution_count = 1;
+    return result;
+  }
+  result.status = LOTT_STATUS_FAILED_CERTIFICATE;
+  result.correction.setConstant(std::numeric_limits<double>::quiet_NaN());
+  return result;
+}
+
+} // namespace lott_certified_detail
+
+// The theorem-aligned exact point solver.  The input has already undergone the
+// g>=0 image swap, and selected_chart is the largest-|q_i| chart (0..3).
+inline LottCertifiedPointResult lott_solve_certified_point(
+    const double a_input, const double b_input, const double c_input,
+    const double d_input, const double e_input, const double f_input,
+    const double g_input, const int selected_chart,
+    const double initial_mu_input =
+        std::numeric_limits<double>::quiet_NaN()) {
+  using namespace lott_certified_detail;
+  LottCertifiedPointResult result;
+
+  const std::array<double, 7> raw = {a_input, b_input, c_input, d_input,
+                                     e_input, f_input, g_input};
+  for (const double v : raw) {
+    if (!std::isfinite(v)) {
+      result.status = LOTT_STATUS_FAILED_INVALID_INPUT;
+      return result;
+    }
+  }
+  if (!(a_input >= 0.0) || !(b_input >= 0.0) || b_input > a_input ||
+      !(g_input >= 0.0) || selected_chart < 0 || selected_chart > 3) {
+    result.status = LOTT_STATUS_FAILED_INVALID_INPUT;
+    return result;
+  }
+
+  long double coefficient_scale = 0.0L;
+  for (const double v : raw) {
+    coefficient_scale =
+        std::max(coefficient_scale, std::abs(static_cast<long double>(v)));
+  }
+  if (!(coefficient_scale > 0.0L)) {
+    result.correction.setZero();
+    result.status = LOTT_STATUS_ALREADY_FEASIBLE;
+    result.certified_solution_count = 1;
+    result.feasibility_ok = result.kkt_ok = result.hessian_ok = true;
+    result.root.converged = true;
+    result.root.multiplier = 0.0;
+    result.root.minimum_hessian_eigenvalue = 1.0;
+    return result;
+  }
+
+  const long double a = static_cast<long double>(a_input) / coefficient_scale;
+  const long double b = static_cast<long double>(b_input) / coefficient_scale;
+  const LD4 q = {static_cast<long double>(c_input) / coefficient_scale,
+                 static_cast<long double>(d_input) / coefficient_scale,
+                 static_cast<long double>(e_input) / coefficient_scale,
+                 static_cast<long double>(f_input) / coefficient_scale};
+  const long double g = static_cast<long double>(g_input) / coefficient_scale;
+  constexpr long double kNearZero =
+      256.0L * static_cast<long double>(std::numeric_limits<double>::epsilon());
+
+  // g=0 has the zero correction as the unique minimum.  Treat a residual below
+  // the scale-aware roundoff floor the same way and still run the certificate.
+  if (std::abs(g) <= kNearZero) {
+    const LD4 u = {0.0L, 0.0L, 0.0L, 0.0L};
+    result.root.converged = true;
+    result.root.multiplier = 0.0;
+    if (certify(a, b, q, g, u, 0.0L, false, result)) {
+      result.correction.setZero();
+      result.status = LOTT_STATUS_ALREADY_FEASIBLE;
+      result.certified_solution_count = 1;
+      return result;
+    }
+    result.status = LOTT_STATUS_FAILED_CERTIFICATE;
+    result.correction.setConstant(std::numeric_limits<double>::quiet_NaN());
+    return result;
+  }
+
+  // With a=0 the quadric is the affine hyperplane 2 q^T u + g=0.
+  if (!(a > 0.0L)) {
+    long double q2 = 0.0L;
+    for (const long double qj : q) {
+      q2 += qj * qj;
+    }
+    if (!(q2 > 0.0L)) {
+      const bool nonzero_q =
+          q[0] != 0.0L || q[1] != 0.0L || q[2] != 0.0L || q[3] != 0.0L;
+      // A literal zero normal makes the nonzero affine constraint infeasible.
+      // A nonzero normal whose squared norm underflows instead means working
+      // precision cannot represent/certify the projection, so fail closed as a
+      // certificate failure and allow the external fallback policy to decide.
+      result.status = nonzero_q ? LOTT_STATUS_FAILED_CERTIFICATE
+                                : LOTT_STATUS_FAILED_INVALID_INPUT;
+      return result;
+    }
+    const long double alpha = -g / (2.0L * q2);
+    LD4 u{};
+    for (int j = 0; j < 4; ++j) {
+      u[static_cast<size_t>(j)] = alpha * q[static_cast<size_t>(j)];
+    }
+    const long double lambda_normalized = g / (4.0L * q2);
+    result.root.converged = true;
+    result.root.multiplier = static_cast<double>(
+        lambda_normalized / coefficient_scale);
+    set_double_correction(u, result);
+    if (result.correction.allFinite() &&
+        certify(a, b, q, g, rounded_correction(result), lambda_normalized,
+                false, result)) {
+      result.status = LOTT_STATUS_AFFINE;
+      result.certified_solution_count = 1;
+      return result;
+    }
+    result.status = LOTT_STATUS_FAILED_CERTIFICATE;
+    result.correction.setConstant(std::numeric_limits<double>::quiet_NaN());
+    return result;
+  }
+
+  // Classify the PSD endpoint mu=1 before attempting an interior root.  For
+  // a>b the nullspace is span(e_z); for exactly equal singular values it is
+  // span(e_z,e_w).  Near equality remains on the mathematically correct a>b
+  // branch and is evaluated in long double rather than inventing a nullspace.
+  const bool equal_singular = (a_input == b_input);
+  const long double q_norm =
+      std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+  const long double qn_norm = std::sqrt(
+      q[2] * q[2] + (equal_singular ? q[3] * q[3] : 0.0L));
+  // The orthogonal canonicalization introduces a few ulps even when q_N is
+  // algebraically zero.  Remove only that bounded transform noise; a genuinely
+  // small value such as 1e-13 at unit scale remains on the unique interior
+  // stratum and is never relabeled as a PSD-boundary optimum.
+  const long double qn_canonicalization_tol =
+      32.0L * static_cast<long double>(std::numeric_limits<double>::epsilon()) *
+      std::max(1.0L, q_norm);
+  // Thus the numerical classifier is backward-stable with respect to the
+  // canonicalization, rather than a literal exact-stratum test.  No boundary
+  // label is returned unless the final feasibility/KKT/PSD certificate passes.
+  const bool qn_is_zero = qn_norm <= qn_canonicalization_tol;
+
+  LD4 ubar = {-q[0] / (2.0L * a), -q[1] / (a + b), 0.0L, 0.0L};
+  if (!equal_singular) {
+    ubar[3] = -q[3] / (a - b);
+  }
+  const long double r = constraint_value(a, b, q, g, ubar);
+  // Do not merge genuinely positive/negative strata.  This narrow guard only
+  // absorbs the forward-error floor of evaluating h(ubar); values such as
+  // +/-1e-13 remain distinct at unit scale.
+  const long double r_roundoff_tol =
+      32.0L * static_cast<long double>(std::numeric_limits<double>::epsilon()) *
+      constraint_scale(a, b, q, g, ubar);
+  const bool r_is_roundoff_zero = std::abs(r) <= r_roundoff_tol;
+  if (qn_is_zero && std::isfinite(r) &&
+      (r > 0.0L || r_is_roundoff_zero)) {
+    LD4 u = ubar;
+    bool nonunique = false;
+    if (r > r_roundoff_tol) {
+      // Deterministic first-null-vector representative.  Keep the complete
+      // quadratic formula even though exact stratum membership gives q_z=0.
+      const long double disc = q[2] * q[2] + a * r;
+      if (!(disc >= 0.0L) || !std::isfinite(disc)) {
+        result.status = LOTT_STATUS_FAILED_CERTIFICATE;
+        return result;
+      }
+      u[2] = (q[2] + std::sqrt(disc)) / a;
+      nonunique = true;
+    }
+    result.root.converged = true;
+    result.root.multiplier = 1.0 / (2.0 * a_input);
+    set_double_correction(u, result);
+    if (result.correction.allFinite() &&
+        certify(a, b, q, g, rounded_correction(result), 1.0L, true,
+                result)) {
+      result.status = nonunique ? LOTT_STATUS_BOUNDARY_PSD_NONUNIQUE
+                                : LOTT_STATUS_BOUNDARY_PSD_UNIQUE;
+      result.certified_solution_count = nonunique ? 2 : 1;
+      return result;
+    }
+    result.status = LOTT_STATUS_FAILED_CERTIFICATE;
+    result.correction.setConstant(std::numeric_limits<double>::quiet_NaN());
+    return result;
+  }
+
+  // The remaining cases have a unique root in 0<mu<1.  phi is strictly
+  // decreasing there.  Establish a finite negative right endpoint without
+  // ever crossing or evaluating the singular boundary.
+  long double q2 = 0.0L;
+  for (const long double qj : q) {
+    q2 += qj * qj;
+  }
+  // A valid selected-chart Householder proposal is useful as a starting point,
+  // but never trusted as a root: it is first evaluated as a multiplier and the
+  // bracket remains entirely inside [0,1).  The Newton-at-zero estimate is the
+  // deterministic fallback when the chart proposal is unavailable.
+  long double right = static_cast<long double>(initial_mu_input);
+  if (!(right > 0.0L) || !(right < 1.0L) || !std::isfinite(right)) {
+    right = (q2 > 0.0L) ? (a * g / (2.0L * q2)) : 0.5L;
+  }
+  if (!(right > 0.0L) || !std::isfinite(right)) {
+    right = 0.25L;
+  }
+  right = std::min(right, 0.5L);
+  PhiEvaluation right_eval = evaluate_phi(a, b, q, g, right);
+  int bracket_steps = 0;
+  constexpr int kMaxBracketSteps = 256;
+  while ((std::isnan(right_eval.value) || right_eval.value > 0.0L) &&
+         bracket_steps < kMaxBracketSteps) {
+    const long double next = (right < 0.5L) ? std::min(2.0L * right, 0.5L)
+                                            : 0.5L * (right + 1.0L);
+    if (!(next > right) || !(next < 1.0L)) {
+      break;
+    }
+    right = next;
+    right_eval = evaluate_phi(a, b, q, g, right);
+    ++bracket_steps;
+  }
+  if (std::isnan(right_eval.value) || right_eval.value > 0.0L ||
+      !(right < 1.0L)) {
+    // The mu representation may run out of spacing before a very near-endpoint
+    // sign change becomes representable.  Retry in tau=1-mu rather than
+    // crossing the PSD endpoint or accepting an uncertified candidate.
+    return solve_regular_tau(a, b, q, g, a_input);
+  }
+  if (right > 0.75L) {
+    // Near the endpoint, tau retains relative accuracy in the singular
+    // denominator while mu does not.  This also keeps the finite root distinct
+    // from the excluded tau=0 boundary.
+    return solve_regular_tau(a, b, q, g, a_input);
+  }
+
+  long double left = 0.0L;
+  PhiEvaluation left_eval = evaluate_phi(a, b, q, g, left);
+  long double x = 0.5L * right;
+  PhiEvaluation x_eval = evaluate_phi(a, b, q, g, x);
+  constexpr int kMaxSolveSteps = 160;
+  constexpr long double kPhiTol =
+      128.0L * static_cast<long double>(std::numeric_limits<double>::epsilon());
+  int iterations = 0;
+  int bisections = 0;
+  for (; iterations < kMaxSolveSteps; ++iterations) {
+    if (std::isnan(x_eval.value)) {
+      ++result.root.nonfinite_eval_steps;
+      x = 0.5L * (left + right);
+      x_eval = evaluate_phi(a, b, q, g, x);
+      ++bisections;
+      if (std::isnan(x_eval.value)) {
+        break;
+      }
+    }
+
+    if (std::abs(x_eval.value) <= kPhiTol * x_eval.scale) {
+      break;
+    }
+    if (x_eval.value > 0.0L) {
+      left = x;
+      left_eval = x_eval;
+    } else {
+      right = x;
+      right_eval = x_eval;
+    }
+
+    const long double midpoint = 0.5L * (left + right);
+    if (!(midpoint > left) || !(midpoint < right)) {
+      // The two endpoints are adjacent at working precision.  Return the one
+      // with the smaller secular residual and let the explicit certificate
+      // decide whether double precision is adequate for this instance.
+      if (std::abs(left_eval.value) <= std::abs(right_eval.value)) {
+        x = left;
+        x_eval = left_eval;
+      } else {
+        x = right;
+        x_eval = right_eval;
+      }
+      break;
+    }
+
+    long double proposal = std::numeric_limits<long double>::quiet_NaN();
+    if (std::isfinite(x_eval.derivative) && x_eval.derivative < 0.0L) {
+      proposal = x - x_eval.value / x_eval.derivative;
+    }
+    if (!(proposal > left) || !(proposal < right) ||
+        !std::isfinite(proposal)) {
+      proposal = midpoint;
+      ++bisections;
+    }
+    x = proposal;
+    x_eval = evaluate_phi(a, b, q, g, x);
+  }
+
+  result.root.used_sign_bracket = true;
+  result.root.bracket_is_multiplier = true;
+  result.root.iterations = iterations + bracket_steps;
+  result.root.bisection_steps = bisections;
+  result.root.bracket_left = static_cast<double>(
+      left / (2.0L * static_cast<long double>(a_input)));
+  result.root.bracket_right = static_cast<double>(
+      right / (2.0L * static_cast<long double>(a_input)));
+  result.root.multiplier = static_cast<double>(
+      x / (2.0L * static_cast<long double>(a_input)));
+
+  if (std::isnan(x_eval.value) || !(x >= 0.0L) || !(x < 1.0L)) {
+    result.status = LOTT_STATUS_FAILED_BRACKET;
+    return result;
+  }
+
+  const LD4 u = reconstruct_regular(a, b, q, x);
+  set_double_correction(u, result);
+  if (result.correction.allFinite() &&
+      certify(a, b, q, g, rounded_correction(result), x, false, result)) {
+    result.root.converged = true;
+    result.status = LOTT_STATUS_REGULAR_INTERIOR;
+    result.certified_solution_count = 1;
+    return result;
+  }
+  result.status = LOTT_STATUS_FAILED_CERTIFICATE;
+  result.correction.setConstant(std::numeric_limits<double>::quiet_NaN());
+  return result;
+}
+
 // Distance Metric - return squared reprojection error
 //  This is a quadratic upgrade to the linear sampson distance
 double lott_distance_quadratic(const Eigen::Matrix<double, 3, 3> &F,
@@ -734,11 +1467,16 @@ void lott_triangulate(const Eigen::Matrix<double, 4, -1> &A,
                       LottSolverDiagnostics *solver_diag = nullptr,
                       const bool enable_root_count_certificate = false,
                       const int root_solver_mode = 0,
-                      Eigen::VectorXi *cert_closed_count_per_point = nullptr) {
+                      Eigen::VectorXi *cert_closed_count_per_point = nullptr,
+                      Eigen::VectorXi *status_per_point = nullptr) {
   X.resize(4, A.cols());
   if (cert_closed_count_per_point != nullptr) {
     cert_closed_count_per_point->resize(A.cols());
     cert_closed_count_per_point->setConstant(std::numeric_limits<int>::min());
+  }
+  if (status_per_point != nullptr) {
+    status_per_point->resize(A.cols());
+    status_per_point->setConstant(static_cast<int>(LOTT_STATUS_UNSET));
   }
 
   // Step 1: Compute the SVD of the upper left 2x2 of F
@@ -847,6 +1585,7 @@ void lott_triangulate(const Eigen::Matrix<double, 4, -1> &A,
       // largest_val = absf;
     }
     if (solver_diag != nullptr) {
+      ++solver_diag->chart_points[largest_idx - 1];
       if (largest_idx != 1) {
         ++solver_diag->chart_non_x_points;
       }
@@ -880,194 +1619,157 @@ void lott_triangulate(const Eigen::Matrix<double, 4, -1> &A,
       lott_poly6_cx<7>(-b, -a, f, e, d, c, g, p);
     }
 
-    // Step 8-9: solve the selected chart polynomial.
-    // root_solver_mode == 0 uses the full safeguarded branch solver.
-    // root_solver_mode in {1..5} are one-step Householder approximations.
-    int nloops = 0;
+    // Step 8-10.  Mode zero (and unsupported mode values) use the theorem-
+    // aligned multiplier solver.  Modes 1..5 deliberately retain the original
+    // one-step Householder approximations for timing/accuracy experiments and
+    // are explicitly reported as uncertified.
+    const bool use_certified_solver =
+        (root_solver_mode == 0 || root_solver_mode < 1 || root_solver_mode > 5);
+    LottPointStatus point_status = LOTT_STATUS_UNSET;
     LottRootDiagnostics root_diag;
-    double rt = 0.0;
-    if (root_solver_mode == 0) {
-      rt = full_root_iterative(p, nloops, &root_diag);
-    } else if (root_solver_mode == 1) {
-      rt = householder_step_from_origin<1>(p);
-      root_diag.converged = std::isfinite(rt);
-    } else if (root_solver_mode == 2) {
-      rt = householder_step_from_origin<2>(p);
-      root_diag.converged = std::isfinite(rt);
-    } else if (root_solver_mode == 3) {
-      rt = householder_step_from_origin<3>(p);
-      root_diag.converged = std::isfinite(rt);
-    } else if (root_solver_mode == 4) {
-      rt = householder_step_from_origin<4>(p);
-      root_diag.converged = std::isfinite(rt);
-    } else if (root_solver_mode == 5) {
-      rt = householder_step_from_origin<5>(p);
-      root_diag.converged = std::isfinite(rt);
-    } else {
-      // Fallback for unsupported modes: use the full safeguarded solver.
-      rt = full_root_iterative(p, nloops, &root_diag);
-    }
-    if (!std::isfinite(rt)) {
-      rt = 0.0;
-      root_diag.converged = false;
-    }
-    if (solver_diag != nullptr) {
-      if (root_solver_mode == 0) {
+
+    if (use_certified_solver) {
+      const double chart_t0 = householder_step_from_origin<4>(p);
+      const double chart_delta =
+          (largest_idx == 1) ? a
+          : (largest_idx == 2) ? b
+          : (largest_idx == 3) ? -a
+                               : -b;
+      const double chart_map_den = 1.0 + chart_delta * chart_t0;
+      const double chart_mu0 =
+          (std::isfinite(chart_t0) && std::isfinite(chart_map_den) &&
+           chart_map_den != 0.0)
+              ? (-a * chart_t0 / chart_map_den)
+              : std::numeric_limits<double>::quiet_NaN();
+      const LottCertifiedPointResult solved = lott_solve_certified_point(
+          a, b, c, d, e, f, g, largest_idx - 1, chart_mu0);
+      Xod = solved.correction;
+      point_status = solved.status;
+      root_diag = solved.root;
+      cert_closed_count = solved.certified_solution_count;
+
+      if (solver_diag != nullptr) {
         if (root_diag.used_sign_bracket) {
           ++solver_diag->roots_bracketed;
-        } else {
-          ++solver_diag->roots_unbracketed;
         }
         if (root_diag.converged) {
           ++solver_diag->roots_converged;
         } else {
           ++solver_diag->roots_max_steps;
+          if (!root_diag.used_sign_bracket) {
+            ++solver_diag->roots_unbracketed;
+          }
         }
         solver_diag->total_iterations += root_diag.iterations;
         solver_diag->bisection_steps += root_diag.bisection_steps;
         solver_diag->guarded_halfsteps += root_diag.guarded_halfsteps;
         solver_diag->nonfinite_eval_steps += root_diag.nonfinite_eval_steps;
+
+        switch (point_status) {
+        case LOTT_STATUS_ALREADY_FEASIBLE:
+          ++solver_diag->already_feasible_points;
+          break;
+        case LOTT_STATUS_AFFINE:
+          ++solver_diag->affine_points;
+          break;
+        case LOTT_STATUS_REGULAR_INTERIOR:
+          ++solver_diag->regular_interior_points;
+          break;
+        case LOTT_STATUS_BOUNDARY_PSD_UNIQUE:
+          ++solver_diag->boundary_psd_unique_points;
+          break;
+        case LOTT_STATUS_BOUNDARY_PSD_NONUNIQUE:
+          ++solver_diag->boundary_psd_nonunique_points;
+          break;
+        case LOTT_STATUS_FAILED_INVALID_INPUT:
+          ++solver_diag->failed_invalid_input_points;
+          break;
+        case LOTT_STATUS_FAILED_BRACKET:
+          ++solver_diag->failed_bracket_points;
+          break;
+        case LOTT_STATUS_FAILED_CERTIFICATE:
+          ++solver_diag->failed_certificate_points;
+          break;
+        default:
+          break;
+        }
+
+        if (enable_root_count_certificate) {
+          ++solver_diag->cert_points;
+          if (cert_closed_count == 1) {
+            ++solver_diag->cert_rootcount_eq1;
+          } else if (cert_closed_count > 1) {
+            ++solver_diag->cert_rootcount_gt1;
+          } else {
+            ++solver_diag->cert_failures;
+            if (!solved.feasibility_ok) {
+              ++solver_diag->cert_feasibility_failures;
+            }
+            if (!solved.kkt_ok) {
+              ++solver_diag->cert_kkt_failures;
+            }
+            if (!solved.hessian_ok) {
+              ++solver_diag->cert_psd_failures;
+            }
+            if (point_status == LOTT_STATUS_FAILED_BRACKET) {
+              ++solver_diag->cert_missing_bracket;
+            }
+          }
+        }
+      }
+    } else {
+      double rt = std::numeric_limits<double>::quiet_NaN();
+      if (root_solver_mode == 1) {
+        rt = householder_step_from_origin<1>(p);
+      } else if (root_solver_mode == 2) {
+        rt = householder_step_from_origin<2>(p);
+      } else if (root_solver_mode == 3) {
+        rt = householder_step_from_origin<3>(p);
+      } else if (root_solver_mode == 4) {
+        rt = householder_step_from_origin<4>(p);
+      } else if (root_solver_mode == 5) {
+        rt = householder_step_from_origin<5>(p);
+      }
+      root_diag.converged = std::isfinite(rt);
+      point_status = LOTT_STATUS_UNCERTIFIED_APPROXIMATE;
+      cert_closed_count = -1;
+
+      if (std::isfinite(rt)) {
+        if (largest_idx == 1) {
+          Xod(0) = c * rt;
+          Xod(1) = (d * rt) / ((a - b) * rt + 1.0);
+          Xod(2) = (e * rt) / (2.0 * a * rt + 1.0);
+          Xod(3) = (f * rt) / ((a + b) * rt + 1.0);
+        } else if (largest_idx == 2) {
+          Xod(0) = (-c * rt) / ((a - b) * rt - 1.0);
+          Xod(1) = d * rt;
+          Xod(2) = (e * rt) / ((a + b) * rt + 1.0);
+          Xod(3) = (f * rt) / (2.0 * b * rt + 1.0);
+        } else if (largest_idx == 3) {
+          Xod(0) = (-c * rt) / (2.0 * a * rt - 1.0);
+          Xod(1) = (-d * rt) / ((a + b) * rt - 1.0);
+          Xod(2) = e * rt;
+          Xod(3) = (-f * rt) / ((a - b) * rt - 1.0);
+        } else {
+          Xod(0) = (-c * rt) / ((a + b) * rt - 1.0);
+          Xod(1) = (-d * rt) / (2.0 * b * rt - 1.0);
+          Xod(2) = (e * rt) / ((a - b) * rt + 1.0);
+          Xod(3) = f * rt;
+        }
       } else {
+        // Fail visibly.  Returning the observation (rt=0) would silently turn
+        // an arithmetic failure into an infeasible result.
+        Xod.setConstant(std::numeric_limits<double>::quiet_NaN());
+      }
+      if (solver_diag != nullptr) {
+        ++solver_diag->roots_unbracketed;
+        ++solver_diag->uncertified_approximate_points;
         if (root_diag.converged) {
           ++solver_diag->roots_converged;
         } else {
           ++solver_diag->roots_max_steps;
         }
-        ++solver_diag->roots_unbracketed;
       }
-      if (enable_root_count_certificate && root_solver_mode == 0) {
-        constexpr double kCertEndpointTol = 1e-12;
-        ++solver_diag->cert_points;
-        if (root_diag.used_sign_bracket &&
-            std::isfinite(root_diag.bracket_left) &&
-            std::isfinite(root_diag.bracket_right) &&
-            (root_diag.bracket_right > root_diag.bracket_left)) {
-          const double f_left = polyval<6>(p, root_diag.bracket_left);
-          const double f_right = polyval<6>(p, root_diag.bracket_right);
-          if (!std::isfinite(f_left) || !std::isfinite(f_right)) {
-            ++solver_diag->cert_nonfinite_endpoints;
-            ++solver_diag->cert_failures;
-          } else {
-            auto poly_abs_scale = [&](const double x) {
-              const double ax = std::abs(x);
-              double s = std::abs(p[0]);
-              for (int j = 1; j < 7; ++j) {
-                s = s * ax + std::abs(p[j]);
-              }
-              return std::max(1.0, s);
-            };
-            const double left_tol = kCertEndpointTol * poly_abs_scale(root_diag.bracket_left);
-            const double right_tol =
-                kCertEndpointTol * poly_abs_scale(root_diag.bracket_right);
-
-            const bool left_root = (std::abs(f_left) <= left_tol);
-            const bool right_root = (std::abs(f_right) <= right_tol);
-            if (left_root) {
-              ++solver_diag->cert_endpoint_root_left;
-            }
-            if (right_root) {
-              ++solver_diag->cert_endpoint_root_right;
-            }
-
-            const int sign_left = (f_left > left_tol)
-                                      ? 1
-                                      : ((f_left < -left_tol) ? -1 : 0);
-            const int sign_right = (f_right > right_tol)
-                                       ? 1
-                                       : ((f_right < -right_tol) ? -1 : 0);
-            const bool strict_sign_change =
-                (sign_left != 0 && sign_right != 0 && sign_left != sign_right);
-            if (!strict_sign_change) {
-              ++solver_diag->cert_no_sign_change;
-            }
-
-            const int cert_count = sturm_root_count_open_interval_poly6(
-                p, root_diag.bracket_left, root_diag.bracket_right);
-            const bool needs_fallback =
-                (cert_count < 0) ||
-                (strict_sign_change && cert_count == 0 && !left_root &&
-                 !right_root);
-            int resolved_count = cert_count;
-            if (needs_fallback) {
-              ++solver_diag->cert_longdouble_attempts;
-              const int ld_count =
-                  sturm_root_count_open_interval_poly6_long_double(
-                      p, root_diag.bracket_left, root_diag.bracket_right);
-              if (ld_count >= 0) {
-                resolved_count = ld_count;
-                ++solver_diag->cert_longdouble_rescues;
-              } else {
-                ++solver_diag->cert_longdouble_failures;
-              }
-            }
-
-            if (resolved_count < 0) {
-              ++solver_diag->cert_sturm_invalid;
-              ++solver_diag->cert_failures;
-              cert_closed_count = -1;
-            } else if (strict_sign_change && resolved_count == 0 && !left_root &&
-                       !right_root) {
-              // Inconsistent with IVT/sign bracket after fallback.
-              ++solver_diag->cert_ivt_conflict;
-              ++solver_diag->cert_failures;
-              cert_closed_count = -1;
-            } else {
-              const int closed_count =
-                  resolved_count + (left_root ? 1 : 0) + (right_root ? 1 : 0);
-              cert_closed_count = closed_count;
-              if (closed_count == 0) {
-                ++solver_diag->cert_rootcount_eq0;
-              } else if (closed_count == 1) {
-                ++solver_diag->cert_rootcount_eq1;
-              } else {
-                ++solver_diag->cert_rootcount_gt1;
-              }
-            }
-          }
-        } else {
-          ++solver_diag->cert_missing_bracket;
-          ++solver_diag->cert_failures;
-          cert_closed_count = -1;
-        }
-      }
-    }
-
-    // OR A variable approximation of the root can be faster though slightly
-    // less accurate Select a performance speed versus accuracy from less to
-    // more accurate, faster to slower const double rt =
-    // householder_step_from_origin<4>(a,b,c,d,e,f,g);
-
-    // Step 10: Assemble the point
-    //  Note, for example that the real root is c*rt in the x case
-    //   this means that the y value is d*c*rt/((a-b)*c*rt + c)
-    //   So we cancel out the c's for a simpler solution less dependent on c
-
-    if (largest_idx == 1) {
-      // x = c*rt
-      //(x, d*x/((a - b)*x + c), e*x/(2*a*x + c), f*x/((a + b)*x + c), 1)
-      Xod(0) = (c * rt);
-      Xod(1) = (d * rt) / ((a - b) * rt + 1);
-      Xod(2) = (e * rt) / ((a + a) * rt + 1);
-      Xod(3) = (f * rt) / ((a + b) * rt + 1);
-    } else if (largest_idx == 2) {
-      // (-c*y/((a - b)*y - d), y, e*y/((a + b)*y + d), f*y/(2*b*y + d), 1)
-      Xod(0) = (-c * rt) / ((a - b) * rt - 1);
-      Xod(1) = (d * rt);
-      Xod(2) = (e * rt) / ((a + b) * rt + 1);
-      Xod(3) = (f * rt) / ((b + b) * rt + 1);
-    } else if (largest_idx == 3) {
-      //(-c*z/(2*a*z - e), -d*z/((a + b)*z - e), z, -f*z/((a - b)*z - e), 1)
-      Xod(0) = (-c * rt) / ((a + a) * rt - 1);
-      Xod(1) = (-d * rt) / ((a + b) * rt - 1);
-      Xod(2) = (e * rt);
-      Xod(3) = (-f * rt) / ((a - b) * rt - 1);
-    } else // largest_idx == 4
-    {
-      //(-c*w/((a + b)*w - f), -d*w/(2*b*w - f), e*w/((a - b)*w + f), w, 1)
-      Xod(0) = (-c * rt) / ((a + b) * rt - 1);
-      Xod(1) = (-d * rt) / ((b + b) * rt - 1);
-      Xod(2) = (e * rt) / ((a - b) * rt + 1);
-      Xod(3) = (f * rt);
     }
 
     // conditionally swap images back
@@ -1091,6 +1793,9 @@ void lott_triangulate(const Eigen::Matrix<double, 4, -1> &A,
     X.col(i) = X_hat;
     if (cert_closed_count_per_point != nullptr) {
       (*cert_closed_count_per_point)(i) = cert_closed_count;
+    }
+    if (status_per_point != nullptr) {
+      (*status_per_point)(i) = static_cast<int>(point_status);
     }
   }
 }

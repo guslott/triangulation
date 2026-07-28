@@ -5,12 +5,15 @@
 #include <Eigen/Dense>
 
 #include "lott_triangulate.h"
-#include "triangulate_hs.h"
+#include "benchmarks/triangulate_hs.h"
 
 struct LottCertifiedFallbackDiagnostics {
   long long points_total = 0;
   long long cert_eq1_points = 0;
+  long long certified_nonunique_points = 0;
   long long fallback_points = 0;
+  // Retained for source compatibility. Certified nonunique PSD optima are now
+  // accepted directly, so this counter remains zero.
   long long fallback_nonunique_points = 0;
   long long fallback_cert_failure_points = 0;
 };
@@ -37,12 +40,15 @@ inline void lott_triangulate_certified_fallback(
       ++fallback_diag->cert_eq1_points;
       continue;
     }
-    fallback_indices.push_back(i);
-    if (c < 0) {
-      ++fallback_diag->fallback_cert_failure_points;
-    } else {
-      ++fallback_diag->fallback_nonunique_points;
+    if (c > 1) {
+      // Values above one are nonuniqueness sentinels, not literal counts (the
+      // equal-singular boundary can contain a circle of minimizers).  The core
+      // has already returned and certified a deterministic member.
+      ++fallback_diag->certified_nonunique_points;
+      continue;
     }
+    fallback_indices.push_back(i);
+    ++fallback_diag->fallback_cert_failure_points;
   }
 
   fallback_diag->fallback_points = static_cast<long long>(fallback_indices.size());
@@ -64,4 +70,15 @@ inline void lott_triangulate_certified_fallback(
     const int i = fallback_indices[static_cast<size_t>(j)];
     X.col(i) = X_hs.col(j);
   }
+}
+
+// Public convenience name used by the README.  The explicit `_fallback`
+// spelling remains available for callers that want the policy visible at the
+// call site.
+inline void lott_triangulate_certified(
+    const Eigen::Matrix<double, 4, -1> &A, const Eigen::Matrix<double, 3, 3> &F,
+    Eigen::Matrix<double, 4, -1> &X,
+    LottSolverDiagnostics *solver_diag = nullptr,
+    LottCertifiedFallbackDiagnostics *fallback_diag = nullptr) {
+  lott_triangulate_certified_fallback(A, F, X, solver_diag, fallback_diag);
 }

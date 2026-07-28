@@ -30,6 +30,7 @@ add_executable(bench_scaling benchmarks/bench_scaling.cpp)
 add_executable(bench_correctness benchmarks/bench_correctness.cpp)
 add_executable(bench_approximation benchmarks/bench_approximation.cpp)
 add_executable(baseline_acceptance benchmarks/baseline_acceptance.cpp)
+add_executable(theorem_regression benchmarks/theorem_regression.cpp)
 
 # Link against Eigen
 if(TARGET Eigen3::Eigen)
@@ -38,4 +39,10 @@ if(TARGET Eigen3::Eigen)
     target_link_libraries(bench_correctness PRIVATE ${EIGEN3_LIBRARIES})
     target_link_libraries(bench_approximation PRIVATE ${EIGEN3_LIBRARIES})
     target_link_libraries(baseline_acceptance PRIVATE ${EIGEN3_LIBRARIES})
+    target_link_libraries(theorem_regression PRIVATE ${EIGEN3_LIBRARIES})
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME theorem_regression COMMAND theorem_regression)
 endif()

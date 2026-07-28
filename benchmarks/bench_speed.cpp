@@ -239,6 +239,8 @@ int main() {
   std::cout << "Finite ratio Lindstrom niter2: " << ls_ratio << std::endl;
   std::cout << "Finite ratio Kanatani: " << kt_ratio << std::endl;
   std::cout << "certified_eq1_points=" << cf_diag.cert_eq1_points << std::endl;
+  std::cout << "certified_nonunique_points="
+            << cf_diag.certified_nonunique_points << std::endl;
   std::cout << "certified_fallback_points=" << cf_diag.fallback_points << std::endl;
   std::cout << "certified_fallback_nonunique_points=" << cf_diag.fallback_nonunique_points << std::endl;
   std::cout << "certified_fallback_cert_failure_points=" << cf_diag.fallback_cert_failure_points << std::endl;
