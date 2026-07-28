@@ -80,21 +80,6 @@ double quantile(std::vector<double> data, const double q) {
   return data[idx];
 }
 
-template <typename Fn>
-std::vector<double> benchmark_ns_per_pt(Fn fn, const int repeats, const int npts) {
-  std::vector<double> samples;
-  samples.reserve(static_cast<size_t>(repeats));
-  for (int r = 0; r < repeats; ++r) {
-    const auto start = std::chrono::high_resolution_clock::now();
-    fn();
-    const auto end = std::chrono::high_resolution_clock::now();
-    const auto duration =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    samples.push_back(static_cast<double>(duration.count()) / npts);
-  }
-  return samples;
-}
-
 TimingStats summarize_samples(const std::vector<double> &samples) {
   TimingStats stats;
   if (samples.empty()) {
@@ -154,6 +139,10 @@ int main() {
   std::normal_distribution<double> noise(0.0, 2.0);
   const int npts_speed = 5000;
   const int repeats = 40;
+  const int warmup_rounds = 8;
+  const int timed_calls_per_sample = 8;
+  const unsigned int warmup_order_seed = 20260728U;
+  const unsigned int timed_order_seed = 20260729U;
   const double focal_length = 800.0;
 
   Eigen::Matrix3d K = Eigen::Matrix3d::Identity();
@@ -185,22 +174,67 @@ int main() {
     A_speed.col(i).tail<2>() = xpi.head<2>();
   }
 
-  std::vector<MethodStats> stats;
-  stats.reserve(methods.size());
-  for (const auto &m : methods) {
-    MethodStats s;
-    s.method = m.method;
-    s.root_solver_mode = m.root_solver_mode;
+  std::vector<MethodStats> stats(methods.size());
+  std::vector<std::vector<double>> speed_samples(methods.size());
+  for (size_t k = 0; k < methods.size(); ++k) {
+    stats[k].method = methods[k].method;
+    stats[k].root_solver_mode = methods[k].root_solver_mode;
+    speed_samples[k].reserve(static_cast<size_t>(repeats));
+  }
 
-    Eigen::Matrix<double, 4, -1> X_hat(4, npts_speed);
-    lott_triangulate(A_speed, F_speed, X_hat, nullptr, false, m.root_solver_mode); // warmup
+  // Exercise every mode several times before measuring.  The order is shuffled
+  // deterministically in each round so no method is systematically first (cold
+  // inputs) or last (warm inputs).  A common output buffer also removes any
+  // method-specific allocation/address effect from the comparison.
+  Eigen::Matrix<double, 4, -1> X_speed(4, npts_speed);
+  std::vector<size_t> method_order(methods.size());
+  std::iota(method_order.begin(), method_order.end(), size_t{0});
+  std::mt19937 warmup_order_rng(warmup_order_seed);
+  for (int r = 0; r < warmup_rounds; ++r) {
+    std::shuffle(method_order.begin(), method_order.end(), warmup_order_rng);
+    for (const size_t k : method_order) {
+      lott_triangulate(A_speed, F_speed, X_speed, nullptr, false,
+                       methods[k].root_solver_mode);
+    }
+  }
 
-    const auto samples = benchmark_ns_per_pt(
-        [&]() { lott_triangulate(A_speed, F_speed, X_hat, nullptr, false, m.root_solver_mode); },
-        repeats, npts_speed);
-    s.speed = summarize_samples(samples);
-    s.speed_mean_abs_epi = mean_abs_epi(X_hat, F_speed, s.speed_finite_ratio);
-    stats.push_back(s);
+  // Treat each repetition as a randomized block.  Each subround contains one
+  // call to every method, while its independently shuffled order distributes
+  // clock drift, thermal drift, and cache-position effects across methods.  The
+  // aggregate is long enough to reduce scheduler/timer noise without making a
+  // single method run as one large contiguous batch.
+  std::iota(method_order.begin(), method_order.end(), size_t{0});
+  std::mt19937 timed_order_rng(timed_order_seed);
+  for (int r = 0; r < repeats; ++r) {
+    std::vector<double> elapsed_ns(methods.size(), 0.0);
+    for (int c = 0; c < timed_calls_per_sample; ++c) {
+      std::shuffle(method_order.begin(), method_order.end(), timed_order_rng);
+      for (const size_t k : method_order) {
+        const auto start = std::chrono::steady_clock::now();
+        lott_triangulate(A_speed, F_speed, X_speed, nullptr, false,
+                         methods[k].root_solver_mode);
+        const auto end = std::chrono::steady_clock::now();
+        const auto duration =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
+        elapsed_ns[k] += static_cast<double>(duration.count());
+      }
+    }
+    const double points_per_sample =
+        static_cast<double>(npts_speed) * timed_calls_per_sample;
+    for (size_t k = 0; k < methods.size(); ++k) {
+      speed_samples[k].push_back(elapsed_ns[k] / points_per_sample);
+    }
+  }
+
+  for (size_t k = 0; k < methods.size(); ++k) {
+    const auto &m = methods[k];
+    stats[k].speed = summarize_samples(speed_samples[k]);
+
+    // Compute validation metrics outside the timed region from a fresh result.
+    lott_triangulate(A_speed, F_speed, X_speed, nullptr, false,
+                     m.root_solver_mode);
+    stats[k].speed_mean_abs_epi =
+        mean_abs_epi(X_speed, F_speed, stats[k].speed_finite_ratio);
   }
 
   // Accuracy ablation setup (broad Monte Carlo).
@@ -303,6 +337,14 @@ int main() {
 
   std::cout << "repeats=" << repeats << std::endl;
   std::cout << "npts_speed=" << npts_speed << std::endl;
+  std::cout << "speed_protocol=deterministic_randomized_interleaved_blocks"
+            << std::endl;
+  std::cout << "speed_clock=std::chrono::steady_clock" << std::endl;
+  std::cout << "speed_warmup_rounds=" << warmup_rounds << std::endl;
+  std::cout << "speed_timed_calls_per_sample=" << timed_calls_per_sample
+            << std::endl;
+  std::cout << "speed_warmup_order_seed=" << warmup_order_seed << std::endl;
+  std::cout << "speed_timed_order_seed=" << timed_order_seed << std::endl;
   std::cout << "trials=" << trials << std::endl;
   std::cout << "npts_per_trial=" << npts_per_trial << std::endl;
   std::cout << "total_points=" << (trials * npts_per_trial) << std::endl;

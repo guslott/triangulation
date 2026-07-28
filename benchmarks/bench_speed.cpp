@@ -1,6 +1,8 @@
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
-#include <functional>
+#include <cstdint>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -23,6 +25,19 @@ struct TimingStats {
   double stddev = std::numeric_limits<double>::quiet_NaN();
   double ci95 = std::numeric_limits<double>::quiet_NaN();
 };
+
+enum class TimingMethod : std::size_t {
+  Lott = 0,
+  LottCertifiedFallback,
+  HartleySturm,
+  LindstromNiter1,
+  LindstromNiter2,
+  Kanatani,
+  Count
+};
+
+constexpr std::size_t kTimingMethodCount =
+    static_cast<std::size_t>(TimingMethod::Count);
 
 void swap_output_packing(const Eigen::Matrix<double, 4, -1> &in,
                          Eigen::Matrix<double, 4, -1> &out) {
@@ -48,20 +63,6 @@ Eigen::Matrix3d random_rotation(std::mt19937 &rng, double max_deg) {
   }
   const double theta = ang(rng);
   return Eigen::AngleAxisd(theta, axis).toRotationMatrix();
-}
-
-template <typename Fn>
-std::vector<double> benchmark_ns_per_pt(Fn fn, const int repeats, const int npts) {
-  std::vector<double> samples;
-  samples.reserve(static_cast<size_t>(repeats));
-  for (int r = 0; r < repeats; ++r) {
-    const auto start = std::chrono::high_resolution_clock::now();
-    fn();
-    const auto end = std::chrono::high_resolution_clock::now();
-    const auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start);
-    samples.push_back(static_cast<double>(duration.count()) / npts);
-  }
-  return samples;
 }
 
 TimingStats summarize_samples(const std::vector<double> &samples) {
@@ -122,6 +123,8 @@ int main() {
 
   const int npts = 5000;
   const int repeats = 40;
+  const int warmup_rounds = 8;
+  constexpr std::uint32_t timing_order_seed = 0x6c6f7474U;
   const double focal_length = 800.0;
   Eigen::Matrix3d K = Eigen::Matrix3d::Identity();
   K(0, 0) = focal_length;
@@ -163,27 +166,91 @@ int main() {
       X_hat_ls1(4, npts), X_hat_ls2(4, npts), X_hat_kt(4, npts),
       X_hat_cf(4, npts);
 
-  // Warm-up for fairer timing.
-  lott_triangulate(A, F, X_hat);
-  lott_triangulate_certified_fallback(A, F, X_hat_cf);
-  hartley_triangulate(x, xp, F, X_hat_hs);
-  triangulation::lindstrom_niter1(x, xp, F_baseline, X_hat_ls1);
-  triangulation::lindstrom_niter2(x, xp, F_baseline, X_hat_ls2);
-  triangulation::kanatani_triangulate(x, xp, F_baseline, X_hat_kt);
+  const auto run_method = [&](const TimingMethod method) {
+    switch (method) {
+    case TimingMethod::Lott:
+      lott_triangulate(A, F, X_hat);
+      break;
+    case TimingMethod::LottCertifiedFallback:
+      lott_triangulate_certified_fallback(A, F, X_hat_cf);
+      break;
+    case TimingMethod::HartleySturm:
+      hartley_triangulate(x, xp, F, X_hat_hs);
+      break;
+    case TimingMethod::LindstromNiter1:
+      triangulation::lindstrom_niter1(x, xp, F_baseline, X_hat_ls1);
+      break;
+    case TimingMethod::LindstromNiter2:
+      triangulation::lindstrom_niter2(x, xp, F_baseline, X_hat_ls2);
+      break;
+    case TimingMethod::Kanatani:
+      triangulation::kanatani_triangulate(x, xp, F_baseline, X_hat_kt);
+      break;
+    case TimingMethod::Count:
+      break;
+    }
+  };
 
-  const auto lott_samples =
-      benchmark_ns_per_pt([&]() { lott_triangulate(A, F, X_hat); }, repeats, npts);
-  const auto hs_samples = benchmark_ns_per_pt(
-      [&]() { hartley_triangulate(x, xp, F, X_hat_hs); }, repeats, npts);
-  const auto cf_samples = benchmark_ns_per_pt(
-      [&]() { lott_triangulate_certified_fallback(A, F, X_hat_cf); }, repeats,
-      npts);
-  const auto ls1_samples = benchmark_ns_per_pt(
-      [&]() { triangulation::lindstrom_niter1(x, xp, F_baseline, X_hat_ls1); }, repeats, npts);
-  const auto ls_samples = benchmark_ns_per_pt(
-      [&]() { triangulation::lindstrom_niter2(x, xp, F_baseline, X_hat_ls2); }, repeats, npts);
-  const auto kt_samples = benchmark_ns_per_pt(
-      [&]() { triangulation::kanatani_triangulate(x, xp, F_baseline, X_hat_kt); }, repeats, npts);
+  const auto run_interleaved = [&](const int rounds, std::mt19937 &order_rng,
+                                   std::array<std::vector<double>,
+                                              kTimingMethodCount> *samples) {
+    std::array<TimingMethod, kTimingMethodCount> base_order{
+        TimingMethod::Lott, TimingMethod::LottCertifiedFallback,
+        TimingMethod::HartleySturm, TimingMethod::LindstromNiter1,
+        TimingMethod::LindstromNiter2, TimingMethod::Kanatani};
+
+    for (int round = 0; round < rounds; ++round) {
+      const std::size_t rotation =
+          static_cast<std::size_t>(round) % kTimingMethodCount;
+      if (rotation == 0) {
+        std::shuffle(base_order.begin(), base_order.end(), order_rng);
+      }
+
+      for (std::size_t position = 0; position < kTimingMethodCount;
+           ++position) {
+        const TimingMethod method =
+            base_order[(position + rotation) % kTimingMethodCount];
+        if (samples == nullptr) {
+          run_method(method);
+          continue;
+        }
+
+        const auto start = std::chrono::steady_clock::now();
+        run_method(method);
+        const auto end = std::chrono::steady_clock::now();
+        const double elapsed_ns =
+            std::chrono::duration<double, std::nano>(end - start).count();
+        (*samples)[static_cast<std::size_t>(method)].push_back(elapsed_ns /
+                                                               npts);
+      }
+    }
+  };
+
+  // Warm every implementation and its output allocation repeatedly before any
+  // samples are collected. Use a separate deterministic schedule so the timed
+  // order is reproducible solely from timing_order_seed.
+  std::mt19937 warmup_order_rng(timing_order_seed ^ 0x9e3779b9U);
+  run_interleaved(warmup_rounds, warmup_order_rng, nullptr);
+
+  std::array<std::vector<double>, kTimingMethodCount> timing_samples;
+  for (auto &method_samples : timing_samples) {
+    method_samples.reserve(static_cast<std::size_t>(repeats));
+  }
+  std::mt19937 timing_order_rng(timing_order_seed);
+  run_interleaved(repeats, timing_order_rng, &timing_samples);
+
+  const auto &lott_samples =
+      timing_samples[static_cast<std::size_t>(TimingMethod::Lott)];
+  const auto &cf_samples = timing_samples[static_cast<std::size_t>(
+      TimingMethod::LottCertifiedFallback)];
+  const auto &hs_samples =
+      timing_samples[static_cast<std::size_t>(TimingMethod::HartleySturm)];
+  const auto &ls1_samples = timing_samples[static_cast<std::size_t>(
+      TimingMethod::LindstromNiter1)];
+  const auto &ls_samples = timing_samples[static_cast<std::size_t>(
+      TimingMethod::LindstromNiter2)];
+  const auto &kt_samples =
+      timing_samples[static_cast<std::size_t>(TimingMethod::Kanatani)];
 
   const TimingStats lott_stats = summarize_samples(lott_samples);
   const TimingStats hs_stats = summarize_samples(hs_samples);
@@ -218,6 +285,9 @@ int main() {
 
   std::cout << "repeats=" << repeats << std::endl;
   std::cout << "npts=" << npts << std::endl;
+  std::cout << "timing_protocol=seeded_shuffle_balanced_rotation" << std::endl;
+  std::cout << "timing_order_seed=" << timing_order_seed << std::endl;
+  std::cout << "timing_warmup_rounds=" << warmup_rounds << std::endl;
   print_timing_block("Lott triangulation", lott_stats);
   print_timing_block("Lott certified+fallback triangulation", cf_stats);
   print_timing_block("Hartley-Sturm triangulation", hs_stats);
