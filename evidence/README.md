@@ -13,7 +13,8 @@ seeds, and SHA-256 hashes of the locally retained raw outputs.
   produced from clean commit `e53b19c`, reports a zero pipeline exit status,
   and uses the deterministic interleaved timing protocol.
 
-Raw and processed benchmark outputs stay under the ignored `results/` tree so
-large point-level CSV files do not enter source control.  Their hashes in each
-manifest make the local artifacts auditable; release packaging may include the
-corresponding raw files separately.
+The small authoritative text outputs are force-tracked under `results/raw/` so
+the reported aggregate evidence travels with the source. Large point-level CSV
+files and generated plots/tables remain ignored; their hashes in the manifest
+make locally retained artifacts auditable, and the release package may include
+them separately.

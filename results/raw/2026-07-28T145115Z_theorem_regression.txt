@@ -1,0 +1,22 @@
+PASS [already_feasible_g_zero] residual=0.000e+00 cost=0.000e+00
+PASS [affine_rank_two] residual=0.000e+00 cost=2.500e-01
+PASS [generic_chart_x] residual=5.812e-15 cost=1.905e+00
+PASS [generic_chart_y] residual=5.402e-17 cost=5.142e+00
+PASS [generic_chart_z] residual=1.694e-16 cost=1.146e+00
+PASS [generic_chart_w] residual=0.000e+00 cost=2.597e-01
+PASS [near_zero_b_over_a] residual=9.284e-17 cost=1.496e-01
+PASS [near_equal_singular_values] residual=4.273e-17 cost=5.586e-01
+PASS [regular_near_psd_endpoint] residual=5.733e-17 cost=5.000e-01
+PASS [negative_g_image_swap] residual=8.600e-17 cost=8.579e-02
+PASS [rotated_nonzero_observation] residual=5.941e-17 cost=2.557e-01
+PASS [b_zero_interior_r_negative] residual=0.000e+00 cost=2.007e+00
+PASS [b_zero_boundary_unique_r_zero] residual=7.628e-17 cost=2.250e+00
+PASS [b_zero_boundary_two_point] residual=6.539e-17 cost=2.500e+00
+PASS [positive_b_boundary_two_point] residual=5.733e-17 cost=5.000e-01
+PASS [equal_singular_boundary_circle] residual=1.399e-17 cost=2.500e+00
+PASS [fail_closed_point_helpers]
+PASS [mixed_status_batch]
+PASS [near_endpoint_root_diagnostics] mu=9.999000e-01 status=3 cert_flags=111 bracket=4.999390e-01,4.999500e-01
+PASS [fundamental_scale_invariance]
+PASS [exact_stratum_contracts] qn_statuses=3,3 r_statuses=3,5
+theorem_regression: 580/580 checks passed across 16 fixtures

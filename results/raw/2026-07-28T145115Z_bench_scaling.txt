@@ -1,0 +1,15 @@
+repeats=40
+method=Lott Full
+sizes=500,1000,2000,5000,10000,20000
+npts=500 total_ns_mean=82294.9 total_ns_std=11348.6 total_ns_ci95=3516.95 ns_per_pt_mean=164.59 ns_per_pt_std=22.6971 ns_per_pt_ci95=7.03391
+npts=1000 total_ns_mean=153735 total_ns_std=28273 total_ns_ci95=8761.89 ns_per_pt_mean=153.735 ns_per_pt_std=28.273 ns_per_pt_ci95=8.76189
+npts=2000 total_ns_mean=271796 total_ns_std=52563.4 total_ns_ci95=16289.6 ns_per_pt_mean=135.898 ns_per_pt_std=26.2817 ns_per_pt_ci95=8.14478
+npts=5000 total_ns_mean=624273 total_ns_std=321185 total_ns_ci95=99536.4 ns_per_pt_mean=124.855 ns_per_pt_std=64.2371 ns_per_pt_ci95=19.9073
+npts=10000 total_ns_mean=916490 total_ns_std=70195.8 total_ns_ci95=21753.9 ns_per_pt_mean=91.649 ns_per_pt_std=7.01958 ns_per_pt_ci95=2.17539
+npts=20000 total_ns_mean=1.83468e+06 total_ns_std=281548 total_ns_ci95=87252.6 ns_per_pt_mean=91.7341 ns_per_pt_std=14.0774 ns_per_pt_ci95=4.36263
+fit_slope_ns_per_pt=87.5706
+fit_intercept_ns=85300.6
+fit_r2=0.993188
+ns_per_pt_min=91.649
+ns_per_pt_max=164.59
+ns_per_pt_ratio_max_over_min=1.79587

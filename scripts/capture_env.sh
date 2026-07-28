@@ -17,8 +17,19 @@ export MPLCONFIGDIR="$MPL_CACHE_DIR"
 export XDG_CACHE_HOME="$XDG_CACHE_DIR"
 
 CPU_MODEL="unknown"
+CORE_SUMMARY="unknown"
+MEMORY_SUMMARY="unknown"
 if command -v sysctl >/dev/null 2>&1; then
   CPU_MODEL="$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
+fi
+if [[ "$(uname -s)" == "Darwin" ]] && command -v system_profiler >/dev/null 2>&1; then
+  HARDWARE_PROFILE="$(system_profiler SPHardwareDataType 2>/dev/null || true)"
+  PROFILE_CHIP="$(printf '%s\n' "$HARDWARE_PROFILE" | awk -F': ' '/^[[:space:]]*Chip:/{print $2; exit}')"
+  CORE_SUMMARY="$(printf '%s\n' "$HARDWARE_PROFILE" | awk -F': ' '/^[[:space:]]*Total Number of Cores:/{print $2; exit}')"
+  MEMORY_SUMMARY="$(printf '%s\n' "$HARDWARE_PROFILE" | awk -F': ' '/^[[:space:]]*Memory:/{print $2; exit}')"
+  if [[ -n "$PROFILE_CHIP" ]]; then
+    CPU_MODEL="$PROFILE_CHIP"
+  fi
 fi
 if [[ "$CPU_MODEL" == "unknown" ]]; then
   CPU_MODEL="$(uname -m)"
@@ -65,6 +76,8 @@ hash_file() {
   echo
   echo "- OS: $(uname -srm)"
   echo "- CPU: ${CPU_MODEL}"
+  echo "- Cores: ${CORE_SUMMARY}"
+  echo "- Memory: ${MEMORY_SUMMARY}"
   echo
   echo "## Toolchain"
   echo

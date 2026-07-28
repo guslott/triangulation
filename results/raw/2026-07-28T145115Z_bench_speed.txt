@@ -1,0 +1,42 @@
+repeats=40
+npts=5000
+timing_protocol=seeded_shuffle_balanced_rotation
+timing_order_seed=1819243636
+timing_warmup_rounds=8
+Lott triangulation ns/pt mean: 88.9715
+Lott triangulation ns/pt std: 3.13576
+Lott triangulation ns/pt ci95: 0.971782
+Lott certified+fallback triangulation ns/pt mean: 90.7802
+Lott certified+fallback triangulation ns/pt std: 6.8914
+Lott certified+fallback triangulation ns/pt ci95: 2.13567
+Hartley-Sturm triangulation ns/pt mean: 1339.3
+Hartley-Sturm triangulation ns/pt std: 37.2663
+Hartley-Sturm triangulation ns/pt ci95: 11.549
+Lindstrom niter1 triangulation ns/pt mean: 11.0038
+Lindstrom niter1 triangulation ns/pt std: 0.510187
+Lindstrom niter1 triangulation ns/pt ci95: 0.158109
+Lindstrom niter2 triangulation ns/pt mean: 11.1571
+Lindstrom niter2 triangulation ns/pt std: 0.962378
+Lindstrom niter2 triangulation ns/pt ci95: 0.298244
+Kanatani triangulation ns/pt mean: 42.2213
+Kanatani triangulation ns/pt std: 1.48262
+Kanatani triangulation ns/pt ci95: 0.459468
+Mean |x'Fx| Lott: 5.00441e-16
+Mean |x'Fx| Lott certified+fallback: 5.00441e-16
+Mean |x'Fx| HS: 3.36204e-16
+Mean |x'Fx| Lindstrom niter1: 3.36612e-16
+Mean |x'Fx| Lindstrom niter2: 0.0183571
+Mean |x'Fx| Kanatani: 0.0175148
+Convention note Lindstrom/Kanatani: wrappers use F^T for internal x^TFx' convention; output [x',x], residual evaluated on swapped canonical packing [x,x']
+Finite ratio Lott: 1
+Finite ratio Lott certified+fallback: 1
+Finite ratio HS: 1
+Finite ratio Lindstrom niter1: 1
+Finite ratio Lindstrom niter2: 1
+Finite ratio Kanatani: 1
+certified_eq1_points=5000
+certified_nonunique_points=0
+certified_fallback_points=0
+certified_fallback_nonunique_points=0
+certified_fallback_cert_failure_points=0
+certified_solver_cert_failures=0

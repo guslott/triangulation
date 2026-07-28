@@ -1,0 +1,50 @@
+baseline_acceptance_seed=20260214
+npts_per_suite=1024
+
+== T1 Convention Test ==
+criterion: preferred packing residual <= 0.1 * alternate
+method=Lott preferred=as_is mean_pref=3.4688831668239217e-14 mean_alt=19.096617081110477 status=PASS
+method=Hartley-Sturm preferred=as_is mean_pref=1.5540520259538226e-14 mean_alt=19.096617081110452 status=PASS
+method=Lindstrom niter1 preferred=swapped mean_pref=1.5354471166739714e-14 mean_alt=19.096617073751165 status=PASS
+method=Lindstrom niter2 preferred=swapped mean_pref=0.5144239231298916 mean_alt=19.219357947906307 status=PASS
+method=Kanatani preferred=swapped mean_pref=0.26906716445523837 mean_alt=19.144726095862946 status=PASS
+T1_status=PASS
+
+== T2 Sanity Test ==
+criterion: nonfinite outputs = 0 across deterministic suites
+suite=general method=Lott nonfinite=0 status=PASS
+suite=general method=Hartley-Sturm nonfinite=0 status=PASS
+suite=general method=Lindstrom niter1 nonfinite=0 status=PASS
+suite=general method=Lindstrom niter2 nonfinite=0 status=PASS
+suite=general method=Kanatani nonfinite=0 status=PASS
+suite=translation method=Lott nonfinite=0 status=PASS
+suite=translation method=Hartley-Sturm nonfinite=0 status=PASS
+suite=translation method=Lindstrom niter1 nonfinite=0 status=PASS
+suite=translation method=Lindstrom niter2 nonfinite=0 status=PASS
+suite=translation method=Kanatani nonfinite=0 status=PASS
+suite=epipole_inside method=Lott nonfinite=0 status=PASS
+suite=epipole_inside method=Hartley-Sturm nonfinite=0 status=PASS
+suite=epipole_inside method=Lindstrom niter1 nonfinite=0 status=PASS
+suite=epipole_inside method=Lindstrom niter2 nonfinite=0 status=PASS
+suite=epipole_inside method=Kanatani nonfinite=0 status=PASS
+T2_status=PASS
+
+== T3 Known-Case Test ==
+case: noiseless correspondences (already on epipolar quadric)
+criteria: exact methods require near-machine precision; approximate methods require bounded small deviation
+method=Lott mean_cost=4.2033530429072264e-26 mean_abs_epi=2.168621185405506e-15 status=PASS
+method=Hartley-Sturm mean_cost=3.4602428346267267e-27 mean_abs_epi=1.038232000372119e-15 status=PASS
+method=Lindstrom niter1 mean_cost=3.4188522890059117e-27 mean_abs_epi=9.2027080400569616e-16 status=PASS
+method=Lindstrom niter2 mean_cost=0.001449512289333731 mean_abs_epi=0.0014495117344444444 status=PASS
+method=Kanatani mean_cost=3.4188522890059117e-27 mean_abs_epi=9.2027080400569616e-16 status=PASS
+T3_status=PASS
+
+== T4 Consistency Test ==
+criterion: exact baselines enforce strong wrapper separation; approximate baselines enforce non-regression under documented wrapper
+method=Hartley-Sturm documented=F mean_doc=1.5540520259538226e-14 mean_alt=18.181127336324092 status=PASS
+method=Lindstrom niter1 documented=F^T mean_doc=1.5354471166739714e-14 mean_alt=18.180956678338617 status=PASS
+method=Lindstrom niter2 documented=F^T mean_doc=0.5144239231298916 mean_alt=0.51259214219189708 criterion=doc<=1.05*alt status=PASS
+method=Kanatani documented=F^T mean_doc=0.26906716445523837 mean_alt=0.50500623516261123 criterion=doc<=0.7*alt status=PASS
+T4_status=PASS
+
+overall_status=PASS
