@@ -20,6 +20,9 @@ A bounded-cost method for two-view triangulation based on orthogonal distance to
 │   ├── bench_approximation.cpp   # Approximation ladder (H1–H4)
 │   ├── baseline_acceptance.cpp   # Baseline convention validation
 │   ├── theorem_regression.cpp    # KKT/PSD and degeneracy regression suite
+│   ├── conditioning_sweep.cpp    # Deterministic conditioning/endpoint sweep
+│   ├── oxford_dinosaur_real.cpp  # Oxford VGG real-track correction probe
+│   ├── sdp_global_comparator.py   # Independent lifted-SDP objective check
 │   ├── triangulate_hs.h          # Hartley–Sturm baseline
 │   ├── triangulate_kanatani.h    # Kanatani baseline
 │   ├── triangulate_lindstrom.h   # Lindstrom baseline
@@ -27,9 +30,17 @@ A bounded-cost method for two-view triangulation based on orthogonal distance to
 │   ├── Polynomial.h              # Polynomial root-finding (for HS)
 │   ├── Polynomial.cpp
 │   └── rpoly.h                   # Jenkins–Traub root finder
+├── evidence/conditioning/        # Tracked conditioning tables and summary
+├── evidence/real_data/           # Compact Oxford Dinosaur real-data evidence
+├── evidence/sdp_comparator/      # Full-population global-relaxation evidence
 └── scripts/                      # Reproducible benchmark pipeline
     ├── run_benchmarks.sh          # Run all benchmarks
     ├── run_baseline_acceptance.sh # Run baseline validation
+    ├── run_conditioning_sweep.sh  # Regenerate conditioning evidence
+    ├── prepare_oxford_dinosaur.py # Fetch/validate tracks and cameras
+    ├── run_oxford_dinosaur_real.sh # Regenerate real-data evidence locally
+    ├── run_sdp_global_comparator.sh # Regenerate the lifted-SDP cross-check
+    ├── requirements-sdp.txt       # Pinned optional NumPy/CVXOPT dependencies
     ├── build_figures.py           # Generate paper figures/tables
     ├── build_figures.sh           # Figure generation wrapper
     └── capture_env.sh             # Record build environment
@@ -41,6 +52,8 @@ A bounded-cost method for two-view triangulation based on orthogonal distance to
 - C++20 compiler (clang or gcc)
 - [Eigen3](https://eigen.tuxfamily.org/) (header-only linear algebra library)
 - CMake >= 3.16
+- Python >= 3.9 (standard library only, for the Oxford data preparation script)
+- Python 3.12, NumPy, and CVXOPT (optional, only for the SDP comparator)
 
 ### Build
 ```bash
@@ -56,12 +69,35 @@ bash scripts/run_benchmarks.sh
 
 # Baseline convention validation only
 bash scripts/run_baseline_acceptance.sh
+
+# Deterministic conditioning and near-degeneracy evidence
+./scripts/run_conditioning_sweep.sh
+
+# Oxford VGG Dinosaur tracked-correspondence validation
+./scripts/run_oxford_dinosaur_real.sh
+
+# Full-population Shor-SDP check on all Oxford pair correspondences
+TPAMI_SDP_PYTHON=python3.12 ./scripts/run_sdp_global_comparator.sh
 ```
 
-Each run uses a fresh timestamped build, executes the theorem and baseline
-gates before timing, and writes raw outputs to `results/raw/`. A tracked-ready
-manifest under `evidence/runs/` records the commit/worktree state, toolchain,
-commands, and SHA-256 hashes for the run artifacts.
+The Oxford runner downloads only the official track, README, and camera-matrix
+files into `/private/tmp`, checks their pinned SHA-256 hashes, derives rank-two
+fundamental matrices from the cameras, and compares certified Lott correction
+with Hartley--Sturm over every co-visible view pair. Set
+`OXFORD_DINO_OFFLINE=1` to require already cached, checksum-valid inputs.
+
+The optional SDP runner regenerates that full point-level input and evaluates
+all 27,080 rows across every nonempty view pair. Its tracked pair-level and
+aggregate evidence is an independent numerical global-relaxation cross-check,
+not a cross-language runtime comparison. Install the exact optional packages
+from `scripts/requirements-sdp.txt`; see `evidence/sdp_comparator/README.md`
+for the formulation, acceptance gates, full-output hash, and claim boundary.
+
+The synthetic benchmark pipeline uses a fresh timestamped build, executes the
+theorem and baseline gates before timing, and writes raw outputs to
+`results/raw/`. A tracked-ready manifest under `evidence/runs/` records the
+commit/worktree state, toolchain, commands, and SHA-256 hashes for those run
+artifacts.
 
 ### Use in Your Code
 

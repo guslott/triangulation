@@ -31,6 +31,8 @@ add_executable(bench_correctness benchmarks/bench_correctness.cpp)
 add_executable(bench_approximation benchmarks/bench_approximation.cpp)
 add_executable(baseline_acceptance benchmarks/baseline_acceptance.cpp)
 add_executable(theorem_regression benchmarks/theorem_regression.cpp)
+add_executable(conditioning_sweep benchmarks/conditioning_sweep.cpp)
+add_executable(oxford_dinosaur_real benchmarks/oxford_dinosaur_real.cpp)
 
 # Link against Eigen
 if(TARGET Eigen3::Eigen)
@@ -40,9 +42,17 @@ if(TARGET Eigen3::Eigen)
     target_link_libraries(bench_approximation PRIVATE ${EIGEN3_LIBRARIES})
     target_link_libraries(baseline_acceptance PRIVATE ${EIGEN3_LIBRARIES})
     target_link_libraries(theorem_regression PRIVATE ${EIGEN3_LIBRARIES})
+    target_link_libraries(conditioning_sweep PRIVATE ${EIGEN3_LIBRARIES})
+    target_link_libraries(oxford_dinosaur_real PRIVATE ${EIGEN3_LIBRARIES})
 endif()
 
 include(CTest)
 if(BUILD_TESTING)
     add_test(NAME theorem_regression COMMAND theorem_regression)
+    add_test(
+        NAME conditioning_sweep
+        COMMAND conditioning_sweep
+                ${CMAKE_BINARY_DIR}/conditioning_sweep_cases.csv
+                ${CMAKE_BINARY_DIR}/conditioning_sweep_bins.csv
+                ${CMAKE_BINARY_DIR}/conditioning_sweep_summary.md)
 endif()

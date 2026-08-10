@@ -1,0 +1,40 @@
+{
+  "cameras": {
+    "count": 36,
+    "shape_each": [
+      3,
+      4
+    ],
+    "text_export": "dino_cameras.tsv",
+    "text_export_sha256": "73d1a28dd1ed6936590aa28cab8939eab2fce436dd100e55cb7c7d049c60ec94",
+    "variable": "P"
+  },
+  "generated_utc": "2026-08-10T15:44:18.812204+00:00",
+  "note": "The official README declares 4838 tracks, but the checksummed viff.xy contains 4983 well-formed rows. The probe preserves and reports this discrepancy.",
+  "source_files": {
+    "README.txt": {
+      "bytes": 1040,
+      "sha256": "0f88ffa9d193d7cbd6e784092f02c8c9b009d367b8e191670f88f82b2c752c8b",
+      "url": "https://www.robots.ox.ac.uk/~vgg/data/dino/README.txt"
+    },
+    "dino_Ps.mat": {
+      "bytes": 5648,
+      "sha256": "61adf55edf43764ab50ce389fd3e95516046cd4ed833584b6f6a2e7ea268d281",
+      "url": "https://www.robots.ox.ac.uk/~vgg/data/dino/dino_Ps.mat"
+    },
+    "viff.xy": {
+      "bytes": 2516415,
+      "sha256": "a23e0044853968dcfbc899bcf80cbdfd5c04f3664ccd7ccd9a7b5701f6d53a8b",
+      "url": "https://www.robots.ox.ac.uk/~vgg/data/dino/viff.xy"
+    }
+  },
+  "source_page": "https://www.robots.ox.ac.uk/~vgg/data/mview/",
+  "tracks": {
+    "columns_per_row": 72,
+    "readme_count_matches_file": false,
+    "readme_declared_tracks": 4838,
+    "rows_observed": 4983,
+    "views": 36,
+    "visible_observations": 16432
+  }
+}
